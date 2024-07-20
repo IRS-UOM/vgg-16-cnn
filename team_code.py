@@ -18,6 +18,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torchvision.models as models
 
 from PIL import Image
 from collections import OrderedDict
@@ -25,7 +26,7 @@ from data_loader import get_training_and_validation_loaders
 from functools import partial
 from helper_code import *
 from matplotlib import pyplot as plt
-from simple_cnn import SimpleCNN
+# from simple_cnn import SimpleCNN
 from sklearn.metrics import average_precision_score,precision_recall_curve,roc_curve, roc_auc_score
 from sklearn.model_selection import train_test_split
 from torch import Tensor
@@ -55,7 +56,6 @@ SCHEDULER_GAMMA=0.1
 
 # Train your models. This function is *required*. You should edit this function to add your code, but do *not* change the arguments
 # of this function. If you do not train one of the models, then you can return None for the model.
-
 def train_models(data_folder, model_folder, verbose):
     # Find the data files.
     if verbose:
@@ -81,19 +81,17 @@ def train_models(data_folder, model_folder, verbose):
             print(f'- {i+1:>{width}}/{num_records}: {records[i]}...')
 
         record = os.path.join(data_folder, records[i])
-        record_parent_folder=os.path.dirname(record)
+        record_parent_folder = os.path.dirname(record)
 
         # Some images may not be labeled, so we'll exclude those
         labels = load_labels(record)
         if labels:
-
             # I'm imposing a further condition: the label strings should be nonempty
-            nonempty_labels=[l for l in labels if l != '']
-            if nonempty_labels != []:
-
+            nonempty_labels = [l for l in labels if l != '']
+            if nonempty_labels:
                 # Add the first image to the list
                 images = get_image_files(record)
-                classification_images.append(os.path.join(record_parent_folder, images[0]) )
+                classification_images.append(os.path.join(record_parent_folder, images[0]))
                 classification_labels.append(nonempty_labels)
 
     # We expect some images to be labeled for classification.
@@ -101,7 +99,7 @@ def train_models(data_folder, model_folder, verbose):
         raise Exception('There are no labels for the data.')
 
     # Fix an ordering of the labels
-    num_classes=len(LIST_OF_ALL_LABELS)
+    num_classes = len(LIST_OF_ALL_LABELS)
 
     # Train the models.
     if verbose:
@@ -112,149 +110,152 @@ def train_models(data_folder, model_folder, verbose):
     #=====================
 
     # Split the training set into "training" and "validation" subsets, returning them as DataLoaders
-    training_loader, validation_loader \
-        = get_training_and_validation_loaders(LIST_OF_ALL_LABELS, classification_images, classification_labels)
+    training_loader, validation_loader = get_training_and_validation_loaders(LIST_OF_ALL_LABELS, classification_images, classification_labels)
 
-    # Initialize a model
-    classification_model = SimpleCNN(LIST_OF_ALL_LABELS).to(DEVICE)
-    for param in classification_model.parameters(): # fine tune all the layers
-        param.requires_grad = True
+    # Initialize the pre-trained VGG16 model
+    vgg16 = models.vgg16(pretrained=True)
+    vgg16.classifier[6] = nn.Linear(4096, num_classes)
+    classification_model = vgg16.to(DEVICE)
+
+    # Freeze all layers except the classifier layer
+    for param in classification_model.features.parameters():
+        param.requires_grad = False
 
     loss = nn.BCELoss() # binary cross entropy loss for multilabel classification
-    opt = optim.Adam(classification_model.parameters(), lr=OPTIM_LR, weight_decay=OPTIM_WEIGHT_DECAY) 
+    opt = optim.Adam(classification_model.classifier.parameters(), lr=OPTIM_LR, weight_decay=OPTIM_WEIGHT_DECAY) 
     scheduler = StepLR(opt, step_size=SCHEDULER_STEP_SIZE, gamma=SCHEDULER_GAMMA) 
 
     N_loss = []
     N_loss_valid = []
     train_auprc = []
     valid_auprc = []
-    train_auroc= []
+    train_auroc = []
     valid_auroc = []
     f1_train = []
     f1_valid = []
 
-    plot_folder=os.path.join(model_folder, "training_figures")
+    plot_folder = os.path.join(model_folder, "training_figures")
     os.makedirs(plot_folder, exist_ok=True)
 
     # Filename to save the final weights to
-    final_weights=None
+    final_weights = None
 
     # Now let's train!
     for epoch in range(EPOCHS):
-
         # Initialization of variables for plotting the progress 
-         N_item_sum = 0 
-         N_item_sum_valid = 0 
-         targets_train = []
-         outputs_train = []
-         targets_valid = []
-         outputs_valid = []
-         
-         ### Training part
-         if verbose:
+        N_item_sum = 0 
+        N_item_sum_valid = 0 
+        targets_train = []
+        outputs_train = []
+        targets_valid = []
+        outputs_valid = []
+
+        ### Training part
+        if verbose:
             print(f"============================[{epoch}]============================")
-         classification_model.train()
-         for i, (image, label) in enumerate(training_loader):
-             opt.zero_grad()
+        classification_model.train()
+        for i, (image, label) in enumerate(training_loader):
+            opt.zero_grad()
 
-             image = image.float().to(DEVICE)
-             label = label.to(torch.float).to(DEVICE)
-             prediction = classification_model(image)
-             
-             # loss
-             N = loss(prediction,label) 
-             N.backward()
-             N_item = N.item()
-             N_item_sum += N_item
+            image = image.float().to(DEVICE)
+            label = label.to(torch.float).to(DEVICE)
+            prediction = classification_model(image)
 
-             # gradient clipping plus optimizer
-             torch.nn.utils.clip_grad_norm_(classification_model.parameters(), max_norm=10)
-             opt.step()
-             if verbose:
+            # loss
+            N = loss(prediction, label)
+            N.backward()
+            N_item = N.item()
+            N_item_sum += N_item
+
+            # gradient clipping plus optimizer
+            torch.nn.utils.clip_grad_norm_(classification_model.parameters(), max_norm=10)
+            opt.step()
+            if verbose:
                 print(f"Epoch: {epoch}, Iteration: {i}, Loss: {N_item}")
 
-             targets_train.append(label.data.cpu().numpy()) #target[:,0]
-             outputs_train.append(prediction.data.cpu().numpy())
+            targets_train.append(label.data.cpu().numpy()) # target[:,0]
+            outputs_train.append(prediction.data.cpu().numpy())
 
-         ### Validation part
-         classification_model.eval()
-         with torch.no_grad():
-          for j, (image, label) in enumerate(validation_loader):
-                 image = image.float().to(DEVICE)
-                 label = label.to(torch.float).to(DEVICE)
-                 prediction = classification_model(image)
-                 
-                 N = loss(prediction,label)
-                 N_item = N.item()
-                 N_item_sum_valid += N.item()
+        ### Validation part
+        classification_model.eval()
+        with torch.no_grad():
+            for j, (image, label) in enumerate(validation_loader):
+                image = image.float().to(DEVICE)
+                label = label.to(torch.float).to(DEVICE)
+                prediction = classification_model(image)
 
-                 targets_valid.append(label.data.cpu().numpy()) #target[:,0]
-                 outputs_valid.append(prediction.data.cpu().numpy())
-                 print(f"Epoch: {epoch}, Valid Iteration: {j}, Loss: {N_item}")
+                N = loss(prediction, label)
+                N_item = N.item()
+                N_item_sum_valid += N.item()
 
-         scheduler.step()
+                targets_valid.append(label.data.cpu().numpy()) # target[:,0]
+                outputs_valid.append(prediction.data.cpu().numpy())
+                print(f"Epoch: {epoch}, Valid Iteration: {j}, Loss: {N_item}")
 
-         # Logging the outputs and targets to caluclate auprc and auroc
-         targets_train = np.concatenate(targets_train, axis=0).T
-         outputs_train = np.concatenate(outputs_train, axis=0).T
-         targets_valid = np.concatenate(targets_valid, axis=0).T
-         outputs_valid = np.concatenate(outputs_valid, axis=0).T
+        scheduler.step()
 
-         auprc_t = average_precision_score(y_true=targets_train, y_score=outputs_train)
-         auroc_t = roc_auc_score(y_true=targets_train, y_score=outputs_train)
-         auprc_v = average_precision_score(y_true=targets_valid, y_score=outputs_valid)
-         auroc_v = roc_auc_score(y_true=targets_valid, y_score=outputs_valid)
+        # Logging the outputs and targets to calculate AUPRC and AUROC
+        targets_train = np.concatenate(targets_train, axis=0).T
+        outputs_train = np.concatenate(outputs_train, axis=0).T
+        targets_valid = np.concatenate(targets_valid, axis=0).T
+        outputs_valid = np.concatenate(outputs_valid, axis=0).T
 
-         train_auprc.append(auprc_t)
-         train_auroc.append(auroc_t)
-         valid_auprc.append(auprc_v)
-         valid_auroc.append(auroc_v)
-         
-         N_loss.append(N_item_sum/i)
-         N_loss_valid.append(N_item_sum_valid/j)
-         
-         # saving loss function after each epoch so you can look on progress
-         fig = plt.figure()
-         plt.plot(N_loss, label="train")
-         plt.plot(N_loss_valid, label="valid")
-         plt.title("Loss function")
-         plt.xlabel('epoch')
-         plt.ylabel('loss')
-         plt.grid()
-         plt.legend()
-         plt.savefig(os.path.join(plot_folder, "loss.png"))
-         plt.close()
+        auprc_t = average_precision_score(y_true=targets_train, y_score=outputs_train)
+        auroc_t = roc_auc_score(y_true=targets_train, y_score=outputs_train)
+        auprc_v = average_precision_score(y_true=targets_valid, y_score=outputs_valid)
+        auroc_v = roc_auc_score(y_true=targets_valid, y_score=outputs_valid)
 
-         fig = plt.figure()
-         plt.plot(train_auprc, label="train auprc")
-         plt.plot(valid_auprc, label="valid auprc")
-         plt.plot(train_auroc, label="train auroc")
-         plt.plot(valid_auroc, label="valid auroc")
-         
-         plt.title("AUPRC and AUROC")
-         plt.xlabel('epoch')
-         plt.ylabel('Performace')
-         plt.grid()
-         plt.legend()
-         plt.savefig(os.path.join(plot_folder, "auroc_auprc.png"))
-         plt.close()
+        train_auprc.append(auprc_t)
+        train_auroc.append(auroc_t)
+        valid_auprc.append(auprc_v)
+        valid_auroc.append(auroc_v)
 
-         ### save model after each epoch
-         file_path = os.path.join(model_folder, "model_weights_" + str(epoch) + ".pth")
-         torch.save(classification_model.state_dict(), file_path)
+        N_loss.append(N_item_sum / i)
+        N_loss_valid.append(N_item_sum_valid / j)
 
-         # If this is the last epoch, then the weights of the model will be saved to this file
-         final_weights = file_path
+        # Saving loss function after each epoch so you can look on progress
+        fig = plt.figure()
+        plt.plot(N_loss, label="train")
+        plt.plot(N_loss_valid, label="valid")
+        plt.title("Loss function")
+        plt.xlabel('epoch')
+        plt.ylabel('loss')
+        plt.grid()
+        plt.legend()
+        plt.savefig(os.path.join(plot_folder, "loss.png"))
+        plt.close()
+
+        fig = plt.figure()
+        plt.plot(train_auprc, label="train auprc")
+        plt.plot(valid_auprc, label="valid auprc")
+        plt.plot(train_auroc, label="train auroc")
+        plt.plot(valid_auroc, label="valid auroc")
+
+        plt.title("AUPRC and AUROC")
+        plt.xlabel('epoch')
+        plt.ylabel('Performance')
+        plt.grid()
+        plt.legend()
+        plt.savefig(os.path.join(plot_folder, "auroc_auprc.png"))
+        plt.close()
+
+        ### save model after each epoch
+        file_path = os.path.join(model_folder, "model_weights_" + str(epoch) + ".pth")
+        torch.save(classification_model.state_dict(), file_path)
+
+        # If this is the last epoch, then the weights of the model will be saved to this file
+        final_weights = file_path
 
     # Create a folder for the models if it does not already exist.
     os.makedirs(model_folder, exist_ok=True)
 
     # Save the models.
-    save_classification_model(model_folder, LIST_OF_ALL_LABELS, final_weights)
+    save_classification_model(f"{epoch}_epochs_vgg16", model_folder, LIST_OF_ALL_LABELS, final_weights)
 
     if verbose:
         print('Done.')
         print()
+
 
 # Load your trained models. This function is *required*. You should edit this
 # function to add your code, but do *not* change the arguments of this
@@ -266,7 +267,13 @@ def load_models(model_folder, verbose):
     classes_filename = os.path.join(model_folder, 'classes.txt')
     classes = joblib.load(classes_filename)
 
-    classification_model = SimpleCNN(classes).to(DEVICE) # instantiate a new copy of the model
+    # Load the pre-trained VGG16 model
+    classification_model = models.vgg16(pretrained=False)
+    num_classes = len(classes)
+    classification_model.classifier[6] = torch.nn.Linear(4096, num_classes)
+    classification_model = classification_model.to(DEVICE) # move the model to the appropriate device
+
+    # Load the saved state dict (weights)
     classification_filename = os.path.join(model_folder, "classification_model.pth")
     classification_model.load_state_dict(torch.load(classification_filename))
 
@@ -335,14 +342,18 @@ def extract_features(record):
     return np.array([mean, std])
 
 # Save your trained models.
-def save_classification_model(model_folder,
-                list_of_classes=None,
-                final_weights=None):
-
+def save_classification_model(model_name, model_folder, list_of_classes=None, final_weights=None):
     if final_weights is not None:
-        classes=filename = os.path.join(model_folder, 'classes.txt')
-        joblib.dump(list_of_classes, filename, protocol=0)
+        # Save the list of classes
+        classes_filename = os.path.join(model_folder, 'classes.txt')
+        joblib.dump(list_of_classes, classes_filename, protocol=0)
 
-        # copy the file with the final weights to the model path
-        model_filename=os.path.join(model_folder, "classification_model.pth")
+        # Save the final weights to the model path
+        model_filename = os.path.join(model_folder, f"{model_name}_classification_model.pth")
         shutil.copyfile(final_weights, model_filename)
+
+        # Save the model architecture
+        architecture_filename = os.path.join(model_folder, f"{model_name}_architecture.pth")
+        torch.save({
+            'model_state_dict': final_weights
+        }, architecture_filename)
