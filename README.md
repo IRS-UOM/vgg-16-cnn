@@ -1,5 +1,12 @@
 # Example code for the George B. Moody PhysioNet Challenge 2024
 
+## Google Colab Link
+
+<a target="blank" href="https://colab.research.google.com/drive/1SDINcD6AgADi_vWpuH0GrQ9VAoRyTe67?usp=sharing">
+        <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="open stuff in google colab"/>
+        </a>
+
+
 ## What's in this repository?
 
 This repository contains a more complex example that illustrates how to format a Python entry for the [George B. Moody PhysioNet Challenge 2024](https://physionetchallenges.org/2024/). Like the [simple example](https://github.com/physionetchallenges/python-example-2024) that we provide as a template for your entries, you can remove some of the code, reuse other code, and add new code to create your entry. You do not need to use the models, features, and/or libraries in this example for your entry. We encourage a diversity of approaches for the Challenges.
